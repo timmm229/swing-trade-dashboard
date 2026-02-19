@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: swing-trade-dashboard
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: EMAIL_TO
+        value: el.capitan.44@gmail.com
+      - key: PORT
+        value: 5000
