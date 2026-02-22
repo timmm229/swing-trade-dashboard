@@ -72,7 +72,7 @@ The app sends emails via Gmail SMTP. You need a **Gmail App Password** (not your
 ```env
 SMTP_USER=your-gmail@gmail.com
 SMTP_PASSWORD=abcdefghijklmnop
-EMAIL_TO=el.capitan.44@gmail.com
+EMAIL_TO=PUTANEMAILADDRESS@EMAIL.COM
 ```
 
 ---
@@ -106,7 +106,7 @@ brew install flyctl   # or see https://fly.io/docs/flyctl/install/
 # Deploy
 cd swing_trade_bot
 fly launch             # follow prompts
-fly secrets set SMTP_USER=your@gmail.com SMTP_PASSWORD=yourapppassword EMAIL_TO=el.capitan.44@gmail.com
+fly secrets set SMTP_USER=your@gmail.com SMTP_PASSWORD=yourapppassword EMAIL_TO=PUTANEMAILADDRESS@EMAIL.COM
 fly deploy
 ```
 
@@ -120,7 +120,7 @@ docker build -t swing-bot .
 docker run -d -p 5000:5000 \
   -e SMTP_USER=your@gmail.com \
   -e SMTP_PASSWORD=yourapppassword \
-  -e EMAIL_TO=el.capitan.44@gmail.com \
+  -e EMAIL_TO=PUTANEMAILADDRESS@EMAIL.COM \
   --name swing-bot \
   swing-bot
 ```
