@@ -32,9 +32,16 @@ from zoneinfo import ZoneInfo
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from matplotlib.gridspec import GridSpec
+import base64
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.drawing.image import Image as XlImage
 from flask import Flask, render_template_string, send_file, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -66,7 +73,7 @@ CST = ZoneInfo(CONFIG["TZ"])
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("SwingBot")
 
-latest = {"file": None, "summary": {}, "generated_at": None, "error": None, "buy_signals": []}
+latest = {"file": None, "summary": {}, "generated_at": None, "error": None, "buy_signals": [], "chart_images": {}}
 
 
 # ===========================================================================
@@ -376,10 +383,128 @@ def fetch_market_news_context():
 
 
 # ===========================================================================
+#  CHART GENERATION
+# ===========================================================================
+
+def generate_charts(tickers_list):
+    """Generate technical analysis chart images for each ticker. Returns dict of ticker -> png path and base64."""
+    log.info("Generating technical charts for %s", tickers_list)
+    charts = {}
+    charts_dir = os.path.join(CONFIG["OUTPUT_DIR"], "charts")
+    os.makedirs(charts_dir, exist_ok=True)
+
+    plt.rcParams.update({
+        "figure.facecolor": "#0d1117", "axes.facecolor": "#161b22",
+        "axes.edgecolor": "#30363d", "axes.labelcolor": "#e6edf3",
+        "text.color": "#e6edf3", "xtick.color": "#8b949e", "ytick.color": "#8b949e",
+        "grid.color": "#21262d", "grid.alpha": 0.5,
+    })
+
+    for ticker in tickers_list:
+        try:
+            tk = yf.Ticker(ticker)
+            hist = tk.history(period="6mo")
+            if hist.empty or len(hist) < 30:
+                continue
+
+            close = hist["Close"]
+            volume = hist["Volume"]
+            dates = hist.index
+
+            # Indicators
+            sma50 = calc_sma(close, 50)
+            sma200 = calc_sma(close, 200)
+            bb_upper, bb_mid, bb_lower = calc_bollinger(close)
+            rsi = calc_rsi(close)
+            macd_line, signal_line, macd_histogram = calc_macd(close)
+
+            # Create figure with 4 subplots
+            fig = plt.figure(figsize=(14, 10))
+            gs = GridSpec(4, 1, height_ratios=[3, 1, 1, 1], hspace=0.08, top=0.93, bottom=0.06, left=0.08, right=0.96)
+
+            # --- Price + MAs + Bollinger ---
+            ax1 = fig.add_subplot(gs[0])
+            ax1.plot(dates, close, color="#58a6ff", linewidth=1.5, label="Price")
+            ax1.plot(dates, sma50, color="#f0883e", linewidth=1, alpha=0.8, label="50-SMA")
+            ax1.plot(dates, sma200, color="#d2a8ff", linewidth=1, alpha=0.8, label="200-SMA")
+            ax1.fill_between(dates, bb_upper, bb_lower, alpha=0.1, color="#58a6ff", label="Bollinger Bands")
+            ax1.plot(dates, bb_upper, color="#58a6ff", linewidth=0.5, alpha=0.4)
+            ax1.plot(dates, bb_lower, color="#58a6ff", linewidth=0.5, alpha=0.4)
+
+            info = tk.info or {}
+            rating = "N/A"
+            for s in latest.get("buy_signals", []):
+                if s["Ticker"] == ticker:
+                    rating = s["Rating"]
+                    break
+            r_color = "#3fb950" if rating == "BUY" else ("#d29922" if rating == "WATCH" else "#f85149")
+            ax1.set_title(f"{ticker} — {info.get('shortName', ticker)}  |  Rating: {rating}",
+                          fontsize=16, fontweight="bold", color=r_color, pad=10)
+            ax1.legend(loc="upper left", fontsize=8, facecolor="#161b22", edgecolor="#30363d", labelcolor="#e6edf3")
+            ax1.set_ylabel("Price ($)", fontsize=10)
+            ax1.tick_params(labelbottom=False)
+            ax1.grid(True)
+
+            # --- Volume ---
+            ax2 = fig.add_subplot(gs[1], sharex=ax1)
+            colors = ["#3fb950" if close.iloc[i] >= close.iloc[i-1] else "#f85149" for i in range(1, len(close))]
+            colors.insert(0, "#3fb950")
+            ax2.bar(dates, volume, color=colors, alpha=0.7, width=0.8)
+            avg_vol = volume.rolling(20).mean()
+            ax2.plot(dates, avg_vol, color="#d29922", linewidth=1, alpha=0.8, label="20-day Avg")
+            ax2.set_ylabel("Volume", fontsize=9)
+            ax2.tick_params(labelbottom=False)
+            ax2.legend(loc="upper left", fontsize=7, facecolor="#161b22", edgecolor="#30363d", labelcolor="#e6edf3")
+            ax2.grid(True)
+
+            # --- RSI ---
+            ax3 = fig.add_subplot(gs[2], sharex=ax1)
+            ax3.plot(dates, rsi, color="#58a6ff", linewidth=1.2)
+            ax3.axhline(y=70, color="#f85149", linewidth=0.8, linestyle="--", alpha=0.7)
+            ax3.axhline(y=30, color="#3fb950", linewidth=0.8, linestyle="--", alpha=0.7)
+            ax3.fill_between(dates, rsi, 70, where=(rsi > 70), alpha=0.2, color="#f85149")
+            ax3.fill_between(dates, rsi, 30, where=(rsi < 30), alpha=0.2, color="#3fb950")
+            ax3.set_ylabel("RSI (14)", fontsize=9)
+            ax3.set_ylim(10, 90)
+            ax3.tick_params(labelbottom=False)
+            ax3.grid(True)
+
+            # --- MACD ---
+            ax4 = fig.add_subplot(gs[3], sharex=ax1)
+            ax4.plot(dates, macd_line, color="#58a6ff", linewidth=1, label="MACD")
+            ax4.plot(dates, signal_line, color="#f0883e", linewidth=1, label="Signal")
+            hist_colors = ["#3fb950" if v >= 0 else "#f85149" for v in macd_histogram]
+            ax4.bar(dates, macd_histogram, color=hist_colors, alpha=0.5, width=0.8)
+            ax4.axhline(y=0, color="#30363d", linewidth=0.5)
+            ax4.set_ylabel("MACD", fontsize=9)
+            ax4.legend(loc="upper left", fontsize=7, facecolor="#161b22", edgecolor="#30363d", labelcolor="#e6edf3")
+            ax4.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
+            ax4.xaxis.set_major_locator(mdates.MonthLocator())
+            plt.setp(ax4.xaxis.get_majorticklabels(), rotation=45, fontsize=8)
+            ax4.grid(True)
+
+            # Save
+            png_path = os.path.join(charts_dir, f"{ticker}_chart.png")
+            fig.savefig(png_path, dpi=130, facecolor="#0d1117")
+            plt.close(fig)
+
+            # Base64 for web
+            with open(png_path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("utf-8")
+
+            charts[ticker] = {"path": png_path, "base64": b64}
+            log.info("Chart generated: %s", ticker)
+        except Exception as e:
+            log.warning("Chart error %s: %s", ticker, e)
+
+    return charts
+
+
+# ===========================================================================
 #  SPREADSHEET GENERATION
 # ===========================================================================
 
-def build_spreadsheet(df, futures, macro, buy_signals):
+def build_spreadsheet(df, futures, macro, buy_signals, charts=None):
     wb = Workbook()
     now = datetime.now(CST)
     timestamp = now.strftime("%Y%m%d_%H%M")
@@ -633,7 +758,53 @@ def build_spreadsheet(df, futures, macro, buy_signals):
         ws3.column_dimensions[get_column_letter(col)].width = w
 
     # ============================
-    # SHEET 4: TRADING NOTES
+    # SHEET 4: TECHNICAL CHARTS
+    # ============================
+    if charts:
+        ws_charts = wb.create_sheet("Technical Charts")
+        ws_charts.merge_cells("A1:N1")
+        ws_charts["A1"] = "TECHNICAL ANALYSIS CHARTS — 6-Month Price + Indicators"
+        ws_charts["A1"].font = Font(name="Arial", bold=True, size=16, color="1F4E79")
+        ws_charts["A1"].alignment = Alignment(horizontal="center")
+        ws_charts.merge_cells("A2:N2")
+        ws_charts["A2"] = f"Updated: {now.strftime('%B %d, %Y at %I:%M %p %Z')} | Each chart: Price + Bollinger + 50/200 SMA + Volume + RSI + MACD"
+        ws_charts["A2"].font = Font(name="Arial", italic=True, size=10, color="666666")
+        ws_charts["A2"].alignment = Alignment(horizontal="center")
+
+        chart_row = 4
+        for i, ticker in enumerate(TICKERS):
+            if ticker in charts:
+                # Add label
+                ws_charts.merge_cells(f"A{chart_row}:N{chart_row}")
+                label_cell = ws_charts[f"A{chart_row}"]
+                rating = "N/A"
+                for s in buy_signals:
+                    if s["Ticker"] == ticker:
+                        rating = s["Rating"]
+                        break
+                label_cell.value = f"{ticker} — Rating: {rating}"
+                r_color = "006100" if rating == "BUY" else ("BF8F00" if rating == "WATCH" else "C00000")
+                label_cell.font = Font(name="Arial", bold=True, size=14, color=r_color)
+                label_cell.alignment = Alignment(horizontal="center")
+
+                chart_row += 1
+                try:
+                    img = XlImage(charts[ticker]["path"])
+                    img.width = 980
+                    img.height = 700
+                    ws_charts.add_image(img, f"A{chart_row}")
+                except Exception as e:
+                    log.warning("Could not embed chart for %s: %s", ticker, e)
+                    ws_charts[f"A{chart_row}"] = f"Chart unavailable for {ticker}"
+
+                chart_row += 38  # space for the image (~700px at default row height)
+
+        ws_charts.column_dimensions['A'].width = 12
+        for c in range(2, 15):
+            ws_charts.column_dimensions[get_column_letter(c)].width = 12
+
+    # ============================
+    # SHEET 5: TRADING NOTES
     # ============================
     ws4 = wb.create_sheet("Trading Notes")
     ws4.merge_cells("A1:D1")
@@ -644,9 +815,10 @@ def build_spreadsheet(df, futures, macro, buy_signals):
         ["HOW TO USE THIS DASHBOARD", ""],
         ["1.", "Check the Market Overview tab first — futures and Fed status set the day's tone"],
         ["2.", "Review Top 10 Swing Trades — sorted by Swing Score (volatility + momentum + volume)"],
-        ["3.", "Check the NEW Buy Signals tab — stocks with BUY rating have the strongest technical setup"],
-        ["4.", "Cross-reference: A stock with HIGH Swing Score + BUY rating = best opportunity"],
-        ["5.", "Always check if earnings are within 7 days — volatility spikes around reports"],
+        ["3.", "Check the Buy Signals tab — stocks with BUY rating have the strongest technical setup"],
+        ["4.", "NEW: Check Technical Charts tab for visual confirmation of signals"],
+        ["5.", "Cross-reference: HIGH Swing Score + BUY rating + chart confirmation = best opportunity"],
+        ["6.", "Always check if earnings are within 7 days — volatility spikes around reports"],
         ["", ""],
         ["RISK MANAGEMENT RULES", ""],
         ["•", "Never risk more than 1-2% of your account on a single swing trade"],
@@ -748,11 +920,14 @@ def run_job(skip_email=False):
         macro = fetch_market_news_context()
         buy_signals = fetch_buy_signals()
 
-        filepath = build_spreadsheet(df, futures, macro, buy_signals)
+        latest["buy_signals"] = buy_signals
+        charts = generate_charts(TICKERS)
+
+        filepath = build_spreadsheet(df, futures, macro, buy_signals, charts)
 
         latest["file"] = filepath
         latest["generated_at"] = datetime.now(CST).isoformat()
-        latest["buy_signals"] = buy_signals
+        latest["chart_images"] = {t: c["base64"] for t, c in charts.items()}
         latest["summary"] = {
             "top3": df.head(3)[["Ticker","Swing Score","Daily % Chg","Current Price"]].to_dict("records"),
             "futures_verdict": "BULLISH" if sum(1 for f in futures if "BULL" in f["signal"] or "DECREASING" in f["signal"]) >= 4 else "MIXED",
@@ -824,10 +999,12 @@ DASHBOARD_HTML = """
     <div class="tab active" onclick="switchTab('futures')">Futures & Macro</div>
     <div class="tab" onclick="switchTab('swing')">Top 10 Swing Trades</div>
     <div class="tab" onclick="switchTab('buy')">Buy Signals</div>
+    <div class="tab" onclick="switchTab('charts')">Technical Charts</div>
   </div>
   <div id="futures" class="tab-content active"></div>
   <div id="swing" class="tab-content"></div>
   <div id="buy" class="tab-content"></div>
+  <div id="charts" class="tab-content"></div>
   <div class="refresh-info" id="timestamp"></div>
 </div>
 <script>
@@ -877,6 +1054,18 @@ async function loadDashboard(){
     });
     h+='</table></div>';
     document.getElementById('buy').innerHTML=h;
+
+    // Technical Charts
+    h='<div class="card"><h2>Technical Analysis Charts — 6-Month</h2><p style="margin-bottom:16px;color:#8b949e">Price + Bollinger Bands + 50/200 SMA | Volume | RSI (14) | MACD</p>';
+    if(d.chart_tickers && d.chart_tickers.length>0){
+      d.chart_tickers.forEach(t=>{
+        h+=`<div style="margin-bottom:24px;text-align:center"><img src="/chart/${t}" style="max-width:100%;border:1px solid #30363d;border-radius:8px" alt="${t} chart" loading="lazy"></div>`;
+      });
+    } else {
+      h+='<p>No charts available yet. Click Refresh to generate.</p>';
+    }
+    h+='</div>';
+    document.getElementById('charts').innerHTML=h;
 
     document.getElementById('timestamp').innerText='Last updated: '+(d.generated_at||'N/A');
   }catch(e){document.getElementById('futures').innerHTML='<div class="card"><p>Could not load data. Click Refresh.</p></div>';}
@@ -935,6 +1124,7 @@ def api_data():
         "futures_verdict": summary.get("futures_verdict", "N/A"),
         "futures": summary.get("futures", []),
         "stocks": stocks, "buy_signals": buy_sigs,
+        "chart_tickers": list(latest.get("chart_images", {}).keys()),
     })
 
 @app.route("/refresh")
@@ -944,6 +1134,14 @@ def refresh():
         return jsonify({"status": "ok"})
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)})
+
+@app.route("/chart/<ticker>")
+def chart_image(ticker):
+    ticker = ticker.upper()
+    chart_path = os.path.join(CONFIG["OUTPUT_DIR"], "charts", f"{ticker}_chart.png")
+    if os.path.exists(chart_path):
+        return send_file(chart_path, mimetype="image/png")
+    return "Chart not found", 404
 
 @app.route("/download")
 def download():
