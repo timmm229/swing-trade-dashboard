@@ -348,6 +348,8 @@ def fetch_futures_data():
         "YM=F": "Dow Futures", "RTY=F": "Russell 2000 Futures",
         "^VIX": "VIX (Fear Index)", "^TNX": "10-Year Treasury Yield",
         "DX-Y.NYB": "US Dollar Index (DXY)",
+        "CL=F": "WTI Crude Oil Futures",
+        "BZ=F": "Brent Crude Oil Futures",
     }
     results = []
     for sym, name in symbols.items():
