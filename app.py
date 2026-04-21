@@ -21,6 +21,7 @@ Usage:
 """
 
 import os, sys, json, time, logging, argparse, threading, smtplib, io, math
+import requests
 from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
@@ -374,14 +375,81 @@ def fetch_futures_data():
     return results
 
 
+def _get_next_fomc():
+    """Return the next upcoming FOMC meeting label from the known 2026-2027 schedule."""
+    # FOMC meets 8x/year; dates published annually by the Fed
+    schedule = [
+        ("Jan 27-28, 2026",  datetime(2026,  1, 27)),
+        ("Mar 17-18, 2026",  datetime(2026,  3, 17)),
+        ("Apr 28-29, 2026",  datetime(2026,  4, 28)),
+        ("Jun 9-10, 2026",   datetime(2026,  6,  9)),
+        ("Jul 28-29, 2026",  datetime(2026,  7, 28)),
+        ("Sep 15-16, 2026",  datetime(2026,  9, 15)),
+        ("Oct 27-28, 2026",  datetime(2026, 10, 27)),
+        ("Dec 8-9, 2026",    datetime(2026, 12,  8)),
+        ("Jan 26-27, 2027",  datetime(2027,  1, 26)),
+        ("Mar 16-17, 2027",  datetime(2027,  3, 16)),
+    ]
+    now = datetime.now()
+    for label, dt in schedule:
+        if dt >= now:
+            return label
+    return schedule[-1][0]
+
+
 def fetch_market_news_context():
-    return {
-        "fed_rate": "3.50% - 3.75%",
-        "fed_status": "Rates held at Jan 27-28 meeting. 2 dissents favored cut.",
-        "next_fomc": "March 17-18, 2026",
-        "market_expects": "93% prob rates held in March; ~65bps cuts priced for 2026",
-        "overall_market": "BULL MARKET — S&P 500 near all-time highs",
+    """Fetch live Fed rate (FRED) and market condition (S&P 500 vs 50/200 DMA)."""
+    result = {
+        "fed_rate": "N/A",
+        "fed_status": "N/A",
+        "next_fomc": _get_next_fomc(),
+        "market_expects": "See CME FedWatch Tool for latest probabilities",
+        "overall_market": "N/A",
     }
+
+    # Live Fed funds target rate bounds from FRED (no API key required)
+    try:
+        low_csv  = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARL", timeout=8).text
+        high_csv = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARU", timeout=8).text
+        low_df   = pd.read_csv(io.StringIO(low_csv),  na_values=".").dropna()
+        high_df  = pd.read_csv(io.StringIO(high_csv), na_values=".").dropna()
+        low_val  = float(low_df.iloc[-1, 1])
+        high_val = float(high_df.iloc[-1, 1])
+        result["fed_rate"]   = f"{low_val:.2f}% - {high_val:.2f}%"
+        result["fed_status"] = f"Target range {result['fed_rate']} (FRED live)"
+    except Exception as e:
+        log.warning("FRED rate fetch failed: %s", e)
+        result["fed_rate"]   = "See federalreserve.gov"
+        result["fed_status"] = "Rate data unavailable"
+
+    # S&P 500 market condition from 50/200-day SMAs and YTD return
+    try:
+        hist = yf.Ticker("^GSPC").history(period="1y")
+        if not hist.empty and len(hist) >= 50:
+            price  = hist["Close"].iloc[-1]
+            sma200 = hist["Close"].rolling(200).mean().iloc[-1]
+            sma50  = hist["Close"].rolling(50).mean().iloc[-1]
+
+            year_start = pd.Timestamp(datetime.now().year, 1, 1)
+            if hist.index.tz is not None:
+                year_start = year_start.tz_localize(hist.index.tz)
+            ytd_hist = hist[hist.index >= year_start]
+            ytd_open = ytd_hist["Close"].iloc[0] if not ytd_hist.empty else hist["Close"].iloc[0]
+            ytd_pct  = (price / ytd_open - 1) * 100
+
+            if price > sma200 and sma50 > sma200:
+                label = "BULL MARKET"
+            elif price < sma200 and sma50 < sma200:
+                label = "BEAR MARKET"
+            else:
+                label = "MIXED/SIDEWAYS"
+
+            result["overall_market"] = f"{label} — S&P 500 {price:,.0f} ({ytd_pct:+.1f}% YTD)"
+    except Exception as e:
+        log.warning("Market condition fetch failed: %s", e)
+        result["overall_market"] = "S&P 500 data unavailable"
+
+    return result
 
 
 # ===========================================================================
